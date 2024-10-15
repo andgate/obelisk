@@ -1,9 +1,8 @@
-import { RangeSet, RangeSetBuilder } from "@codemirror/state";
+import { Transaction, StateEffect } from "@codemirror/state";
 import {
 	Decoration,
 	DecorationSet,
 	EditorView,
-	PluginSpec,
 	PluginValue,
 	ViewPlugin,
 	ViewUpdate,
@@ -94,26 +93,35 @@ class ObeliskSettingTab extends PluginSettingTab {
 	}
 }
 
-export class EmojiWidget extends WidgetType {
-	toDOM(view: EditorView): HTMLElement {
-		const div = document.createElement("span");
+export class AppendTextWidget extends WidgetType {
+	text: string;
 
-		div.innerText = "👉";
+	constructor(text: string) {
+		super();
+		this.text = text;
+	}
 
-		return div;
+	toDOM() {
+		const span = document.createElement("span");
+		span.textContent = this.text;
+		span.className = "obelisk-completion-text"; // Add this line
+		return span;
 	}
 }
 
 class CompletionViewPlugin implements PluginValue {
 	decorations: DecorationSet;
+	completion: string | null = null;
 
 	constructor(view: EditorView) {
-		this.decorations = this.buildDecorations(view);
+		this.decorations = Decoration.none;
+		this.generateCompletions(view);
 	}
 
 	update(update: ViewUpdate) {
 		if (update.docChanged || update.viewportChanged) {
-			this.decorations = this.buildDecorations(update.view);
+			// Only generate completions if the document has changed
+			this.generateCompletions(update.view);
 		}
 	}
 
@@ -121,41 +129,44 @@ class CompletionViewPlugin implements PluginValue {
 		// this.decorations.clear();
 	}
 
-	buildDecorations(view: EditorView): DecorationSet {
-		const builder = new RangeSetBuilder<Decoration>();
-
-		if (view.state.doc.length === 0) {
-			return RangeSet.empty;
+	async generateCompletions(view: EditorView) {
+		this.completion = await fetchCompletion(
+			view.state.doc.sliceString(0, view.state.doc.length),
+		);
+		if (this.completion) {
+			view.dispatch(this.addCompletionDecoration(view));
 		}
+	}
 
-		const endPos = view.state.doc.length;
-		const decoration = Decoration.widget({
-			class: "completion-decoration",
-			widget: new EmojiWidget(),
+	addCompletionDecoration(view: EditorView): Transaction {
+		const widget = Decoration.widget({
+			widget: new AppendTextWidget(this.completion || ""),
+			side: 1,
 		});
+		this.decorations = Decoration.set([
+			widget.range(view.state.doc.length),
+		]);
 
-		builder.add(0, endPos, decoration);
-		return builder.finish();
+		return view.state.update({
+			effects: StateEffect.appendConfig.of(
+				EditorView.decorations.of(this.decorations),
+			),
+		});
 	}
 }
 
-const pluginSpec: PluginSpec<CompletionViewPlugin> = {
-	decorations: (value: CompletionViewPlugin) => value.decorations,
-};
+export const completionViewPlugin = ViewPlugin.fromClass(CompletionViewPlugin, {
+	decorations: (v) => v.decorations,
+});
 
-export const completionViewPlugin = ViewPlugin.fromClass(
-	CompletionViewPlugin,
-	pluginSpec,
-);
-
-async function fetchCompletion(query: string): Promise<string | null> {
-	console.log("Fetching completion for:", query);
+async function fetchCompletion(prompt: string): Promise<string | null> {
+	console.log("Fetching completion for:", prompt);
 	const response = await request({
 		url: `http://localhost:${currentSettings.llamaPort}/api/generate`,
 		method: "POST",
 		body: JSON.stringify({
 			model: `llama${currentSettings.llamaVersion}`,
-			prompt: query,
+			prompt: prompt,
 			stream: false,
 			options: {
 				temperature: 0.7,
